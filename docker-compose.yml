@@ -1,0 +1,84 @@
+# The local stack.
+#
+# EVERY published port is a `${*_HOST_PORT:-<conventional default>}` variable, never
+# a literal. That is what lets a parallel `git worktree` bring up a second stack
+# without editing this file: it sets the offsets in its own `.env`. A hardcoded port
+# here is the bug that makes two checkouts un-runnable at the same time — the
+# defaults exist so a bare clone with no `.env` still works.
+#
+# Containers, network, and volumes are namespaced by COMPOSE_PROJECT_NAME (set in
+# `.env`, and it must equal the checkout's directory name).
+
+services:
+  db:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-photolab}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-photolab_local_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-photolab}
+    ports:
+      - "${DB_HOST_PORT:-5439}:5432"
+    volumes:
+      # The parent, not `.../data`: from 18 the image keeps its cluster in a versioned
+      # directory below this one, and refuses to start with a volume on the old path.
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      # Other services wait on this, so `up -d` returning means the DB is actually
+      # accepting connections — not merely that the container started.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-photolab}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    mem_limit: 512m
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "${REDIS_HOST_PORT:-6386}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    mem_limit: 256m
+
+  app:
+    build:
+      context: .
+      target: dev
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "${APP_HOST_PORT:-8007}:8000"
+    volumes:
+      # Bind-mounted for live reload. The venv stays in an anonymous volume so the
+      # host's (Windows) .venv never shadows the container's (Linux) one.
+      - .:/app
+      - /app/.venv
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    mem_limit: 1g
+
+  frontend:
+    image: node:22-alpine
+    working_dir: /app
+    command: npm run dev -- --host 0.0.0.0
+    ports:
+      - "${FRONTEND_HOST_PORT:-5180}:5173"
+    environment:
+      # Vite HMR does not see writes through a Windows bind mount without polling.
+      CHOKIDAR_USEPOLLING: "true"
+      VITE_API_BASE_URL: http://localhost:${APP_HOST_PORT:-8007}
+    volumes:
+      - ./frontend:/app
+      - node_modules:/app/node_modules
+    mem_limit: 1g
+
+volumes:
+  pgdata:
+  node_modules:
