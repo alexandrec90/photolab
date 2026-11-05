@@ -9,11 +9,12 @@ import os
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
+from photolab.models import Base
+
 config = context.config
 
-# The models' `MetaData`, once there are models: `alembic revision --autogenerate`
-# compares it with the database to write a revision.
-target_metadata = None
+# `alembic revision --autogenerate` compares this with the database to write a revision.
+target_metadata = Base.metadata
 
 
 def database_url() -> str:

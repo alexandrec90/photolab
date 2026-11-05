@@ -55,10 +55,12 @@ head_bytes = 2000
 # `.devkit-structure.txt`, which is committed and may only shrink; the limits below
 # are the script's `DEFAULT_LIMITS` and are shown so a project can see what it holds
 # to. Every key is optional; an unknown limit or rule name is a configuration error.
-#[structure]
+[structure]
 #paths = ["photolab/", "scripts/"]       # defaults to the app tree, scripts/ and the frontend src
 #exclude = ["photolab/migrations/"]      # generated code the project does not answer for
-#entrypoints = ["photolab/plugins/"]     # loaded by name, so the orphan rule must not see them
+# `testSetup.ts` is named by `vite.config.ts`, and `types.ts` is reached only by
+# `import type`, which the orphan rule's graph leaves out.
+entrypoints = ["frontend/src/testSetup.ts", "frontend/src/api/types.ts"]
 #disabled = []                               # e.g. ["orphan"] for a library whose modules are its API
 #
 #[structure.limits]
@@ -140,7 +142,7 @@ redis_env = "REDIS_URL"
 # So: scaffold frontend/ (Vite + vitest, with `test:run` and `typecheck` scripts),
 # then set enabled = true.
 [frontend]
-enabled = false
+enabled = true
 dir = "frontend"
 src = "frontend/src/"
 skin = "frontend/src"

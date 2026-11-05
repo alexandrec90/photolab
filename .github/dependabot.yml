@@ -32,10 +32,59 @@ updates:
           - "minor"
           - "patch"
 
-  # No npm entry: this repository has no `frontend/` yet, and an entry with no manifest
-  # behind it fails Dependabot's scheduled job on every run. Once `frontend/package.json`
-  # exists, `tests/test_dependabot_config.py` fails until the entry is back; restore it
-  # from devkit's `templates/core/dot-github/dependabot.yml.tmpl`, groups included.
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+    assignees:
+      - alexandrec90
+    # Give fast-moving frontend ecosystems time to add peer support for a new
+    # major. This delays version updates only; it never freezes them, and it does
+    # not delay Dependabot security updates.
+    cooldown:
+      semver-major-days: 30
+    groups:
+      # TypeScript, ESLint and their adapters publish compatibility support at
+      # different times, so a lone bump of any one of them is unresolvable against
+      # the others. Evaluate them as a single toolchain PR. Dependabot assigns the
+      # FIRST matching group, so these specific groups must stay above the
+      # catch-all minor/patch group at the bottom.
+      lint-typecheck-toolchain:
+        patterns:
+          - "typescript"
+          - "typescript-eslint"
+          - "@typescript-eslint/*"
+          - "eslint"
+          - "@eslint/*"
+          - "eslint-plugin-*"
+          - "eslint-import-resolver-*"
+        update-types:
+          - "major"
+          - "minor"
+          - "patch"
+      # stylelint and its shared configs pin each other's majors in both
+      # directions, so neither can move without the other.
+      stylelint-toolchain:
+        patterns:
+          - "stylelint"
+          - "stylelint-*"
+        update-types:
+          - "major"
+          - "minor"
+          - "patch"
+      # The test environment moves as one unit: a vitest major that leaves
+      # happy-dom or testing-library behind fails at collection, not at a test,
+      # which reads as "the suite is broken" rather than "a dependency is stale".
+      test-env:
+        patterns:
+          - "vitest"
+          - "@vitest/*"
+          - "happy-dom"
+          - "@testing-library/*"
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
 
   # The actions the workflows pin. Majors land as individual PRs and the auto-merge
   # classifier holds them for review.

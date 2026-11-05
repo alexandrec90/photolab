@@ -1,6 +1,7 @@
 # Photolab
 
-Improve photos and distribute them on social media platforms.
+An audited photo album: annotate each photo once so an LLM need not re-read it, and make
+realistic new photos from real ones. `README.md` covers what it does and why.
 
 ## Tech Stack
 
@@ -91,6 +92,27 @@ and full runs in CI.
 Add this project's specifics *below* — fixtures, isolation rules, markers, what to mock
 and where — but do not restate the policy above. It is vendored and drift-gated; a copy
 here is a fork that will disagree with it the first time either is edited.
+
+- **Never truncate or drop tables outside a test schema.** `DATABASE_URL` is the album's
+  own database, and its annotations cost money to produce. `tests/conftest.py` gives the
+  run a schema of its own; keep it that way.
+- **The suite needs this checkout's own Postgres.** Most tests error with a psycopg
+  `OperationalError` until `docker compose up --detach --wait db` has run in this tree;
+  nothing starts it for a test run, and that is not a code failure.
+- **No test reaches a network or spends a plan.** The Claude client is `FakeAnthropic`,
+  Pexels is an `httpx.MockTransport`, and the `codex` and `claude` commands are `FakeCli`;
+  rembg is faked at `matting.run_model`, since a real matte takes minutes and a 170 MB
+  download.
+- **A green suite says nothing about realism.** Anything changing `compositing.py` output
+  or `ai_images.py` prompts gets looked at, on real photographs, before it is called done.
+  Synthetic fixtures passed a version that blurred the subject and left them floating.
+- **The Docker run hides Windows.** The app runs natively for AI work, and Docker never
+  showed that uvicorn's default loop kills psycopg there, or that stopping a server orphans
+  what `node` and a venv's `python` really are. Run `scripts/album.py` after changing how
+  anything starts or stops.
+- **Never widen what `agents.py` passes to a CLI.** The owner's own Codex config is
+  `danger-full-access`, and `--ignore-user-config` is what keeps that away from anything a
+  photo might say.
 
 ## Guardrails
 

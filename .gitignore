@@ -18,6 +18,10 @@ venv/
 htmlcov/
 .benchmarks/
 
+# Private by nature: the album's originals, and everything derived from them.
+/photos/
+/data/
+
 # Secrets and local environment. `.env.example` IS committed; `.env` never is —
 # it carries this checkout's ports and credentials.
 .env
@@ -65,3 +69,10 @@ Thumbs.db
 # it, and anything reading dirtiness (`sweep.classify`, the session-start banner) calls
 # the checkout `holds_uncommitted` for as long as the worktree exists.
 .claude/worktrees/
+
+# Claude Code links these into every `claude --worktree` tree (worktree.symlinkDirectories
+# in .claude/settings.json). A link is a file to git, which a `dir/` pattern never matches.
+/frontend/node_modules
+
+# `tsc -b` rewrites this on every typecheck, with no final newline for the fixer to accept.
+/frontend/*.tsbuildinfo

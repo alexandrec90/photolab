@@ -15,15 +15,69 @@
 # Module size -- `file_lines`, `imports`, `definitions` -- is advisory and never here.
 #
 # Regenerate only when adopting the gate: python scripts/hooks/structure_check.py --seed
+dependency::frontend/package.json::@testing-library/jest-dom = 1
+dependency::frontend/package.json::@testing-library/react = 1
+dependency::frontend/package.json::@testing-library/user-event = 1
+dependency::frontend/package.json::@types/node = 1
+dependency::frontend/package.json::@types/react = 1
+dependency::frontend/package.json::@types/react-dom = 1
+dependency::frontend/package.json::@vitejs/plugin-react = 1
+dependency::frontend/package.json::jsdom = 1
+dependency::frontend/package.json::react = 1
+dependency::frontend/package.json::react-dom = 1
+dependency::frontend/package.json::typescript = 1
+dependency::frontend/package.json::vite = 1
+dependency::frontend/package.json::vitest = 1
 dependency::pyproject.toml::alembic = 1
+dependency::pyproject.toml::anthropic = 1
+dependency::pyproject.toml::fastapi = 1
+dependency::pyproject.toml::httpx = 1
 dependency::pyproject.toml::mypy = 1
+dependency::pyproject.toml::numpy = 1
+dependency::pyproject.toml::onnxruntime = 1
+dependency::pyproject.toml::opencv-python-headless = 1
+dependency::pyproject.toml::pillow = 1
+dependency::pyproject.toml::pillow-heif = 1
 dependency::pyproject.toml::pre-commit = 1
 dependency::pyproject.toml::psycopg = 1
 dependency::pyproject.toml::pydantic-settings = 1
 dependency::pyproject.toml::pytest = 1
+dependency::pyproject.toml::pytest-asyncio = 1
 dependency::pyproject.toml::pytest-cov = 1
+dependency::pyproject.toml::python-dotenv = 1
 dependency::pyproject.toml::redis = 1
+dependency::pyproject.toml::rembg = 1
 dependency::pyproject.toml::ruff = 1
 dependency::pyproject.toml::sqlalchemy = 1
+dependency::pyproject.toml::uvicorn = 1
 suppressions::scripts/notify-wrap.py = 1
 swallowed_errors::scripts/notify.py = 1
+
+# --- recorded growth ------------------------------------------------
+
+# 2026-11-04  recorded: First real code: FastAPI + uvicorn for the API, anthropic for annotation, pillow, pillow-heif, numpy, opencv and rembg + onnxruntime for imaging, httpx for Pexels, react and its dev toolchain for the album. Each is the one thing doing its job, and each was added for that job.
+#   dependency::frontend/package.json::@testing-library/jest-dom -> 1
+#   dependency::frontend/package.json::@testing-library/react -> 1
+#   dependency::frontend/package.json::@testing-library/user-event -> 1
+#   dependency::frontend/package.json::@types/node -> 1
+#   dependency::frontend/package.json::@types/react -> 1
+#   dependency::frontend/package.json::@types/react-dom -> 1
+#   dependency::frontend/package.json::@vitejs/plugin-react -> 1
+#   dependency::frontend/package.json::jsdom -> 1
+#   dependency::frontend/package.json::react -> 1
+#   dependency::frontend/package.json::react-dom -> 1
+#   dependency::frontend/package.json::typescript -> 1
+#   dependency::frontend/package.json::vite -> 1
+#   dependency::frontend/package.json::vitest -> 1
+#   dependency::pyproject.toml::anthropic -> 1
+#   dependency::pyproject.toml::fastapi -> 1
+#   dependency::pyproject.toml::httpx -> 1
+#   dependency::pyproject.toml::numpy -> 1
+#   dependency::pyproject.toml::onnxruntime -> 1
+#   dependency::pyproject.toml::opencv-python-headless -> 1
+#   dependency::pyproject.toml::pillow -> 1
+#   dependency::pyproject.toml::pillow-heif -> 1
+#   dependency::pyproject.toml::pytest-asyncio -> 1
+#   dependency::pyproject.toml::python-dotenv -> 1
+#   dependency::pyproject.toml::rembg -> 1
+#   dependency::pyproject.toml::uvicorn -> 1
