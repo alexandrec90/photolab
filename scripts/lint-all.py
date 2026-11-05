@@ -14,12 +14,16 @@ Usage:
     python scripts/lint-all.py            # whole repo
     python scripts/lint-all.py --changed  # working-tree diff vs HEAD, plus untracked
     python scripts/lint-all.py --paths a.py b.md  # exactly these (/ship's branch diff)
+
+A narrowed run (`--changed`, `--paths`) also runs the commit stage's `detect-secrets`
+hook over every file it names, Python or not, unless `--no-secrets` is given.
 """
 
 from __future__ import annotations
 
 import argparse
 import importlib.util
+import os
 import re
 import shutil
 import subprocess
@@ -35,7 +39,9 @@ ARTIFACT = REPO_ROOT / "logs" / "lint-errors.log"
 # for a pass alike, so a run that skipped both printed `lint-all: clean` having checked
 # no Python at all. dotenv-linter and the frontend tools keep the note: nothing here
 # declares them, so their absence is a machine without them, not a broken install.
-REQUIRED_TOOLS = ("ruff", "mypy")
+# `detect-secrets` runs through pre-commit, which the same dev group declares, and is only
+# attempted where the config declares it.
+REQUIRED_TOOLS = ("ruff", "mypy", "detect-secrets")
 
 # Names `run_tool` skipped for want of the tool; `main` clears it on entry.
 _SKIPPED: list[str] = []
@@ -132,6 +138,40 @@ def env_files(limit_to: list[str] | None = None) -> list[str]:
     return found if limit_to is None else [p for p in found if p in set(limit_to)]
 
 
+# The commit-stage hook a narrowed run also runs, through pre-commit so its `exclude` and
+# the `# pragma: allowlist secret` convention are the commit's own. Without it every check
+# a session runs before `/ship` passed a hard-coded key that the commit then refused, a
+# whole dispatch later. `pre-commit run --all-files` does not stand in for this: it reads
+# only what git tracks, and the file that refuses is usually new. Not named `SECRETS_*`:
+# the scanner reads any assignment to a name holding that word as a keyword secret.
+SCAN_HOOK_ID = "detect-secrets"
+PRECOMMIT_CONFIG = ".pre-commit-config.yaml"
+
+
+def secrets_targets(selected: list[str], skip: bool) -> list[str]:
+    """The files the secrets pass scans: every selected one, of any type, or none.
+
+    None when `skip` (`--no-secrets`) or when this repo's pre-commit config does not
+    declare the hook: a repo without it has no secrets pass to mirror, and pre-commit
+    would fail the run naming a missing hook id. Narrowed runs only: a whole-repo run is
+    CI's, where pre-commit runs every hook.
+    """
+    config = REPO_ROOT / PRECOMMIT_CONFIG
+    if skip or not selected or not config.is_file():
+        return []
+    declared = re.search(rf"id:\s*{SCAN_HOOK_ID}\s*$", config.read_text(encoding="utf-8"), re.M)
+    return selected if declared else []
+
+
+def secrets_section(paths: list[str]) -> str:
+    """The detect-secrets section for `paths`, run as the commit hook would run it."""
+    if not paths:
+        return ""
+    cmd = [sys.executable, "-m", "pre_commit", "run", SCAN_HOOK_ID, "--files", *paths]
+    hint = "remove the secret, or mark a false positive `# pragma: allowlist secret`"
+    return run_tool(SCAN_HOOK_ID, cmd, hint)
+
+
 # What the frontend typecheck answers for: a change to any of these, under the
 # `[frontend] dir` of `.devkit.toml`, is what a `--changed` run hands it. Without the
 # pass, a TypeScript-only change printed "nothing to do" and the fixer's lint step
@@ -140,11 +180,11 @@ FRONTEND_SUFFIXES = (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs
 FRONTEND_CONFIGS = ("package.json", "tsconfig.json")
 
 
-def frontend_tier() -> Any | None:
-    """`.devkit.toml`'s `[frontend]` tier when it is on, else None.
+def harness_tier(name: str) -> Any | None:
+    """`.devkit.toml`'s `[<name>]` tier when it is on, else None.
 
     Read through the vendored `harness_config.py`, the same reader `stop.py` uses for
-    its typecheck, so the two can never disagree about where the frontend is. Loaded by
+    its typecheck, so the two can never disagree about where a tier is. Loaded by
     path, which mypy does not follow into the vendored tree, and registered before it
     runs: `@dataclass` looks its defining module up by name.
     """
@@ -156,10 +196,61 @@ def frontend_tier() -> Any | None:
     sys.modules[spec.name] = config
     try:
         spec.loader.exec_module(config)
-        tier = config.load(REPO_ROOT).frontend
+        tier = getattr(config.load(REPO_ROOT), name)
     except (ImportError, AttributeError):
         return None
     return tier if tier.enabled else None
+
+
+def frontend_tier() -> Any | None:
+    """`.devkit.toml`'s `[frontend]` tier when it is on, else None."""
+    return harness_tier("frontend")
+
+
+# What the desktop tier answers for. `scripts/desktop.py lint` is a whole-solution
+# command -- `dotnet format` then a build -- so a narrowed run only decides whether to
+# run it, never what it covers.
+DESKTOP_SUFFIXES = (".cs", ".xaml", ".csproj", ".props", ".targets", ".slnx", ".sln")
+DESKTOP_CONFIGS = ("global.json", ".editorconfig")
+DESKTOP_DRIVER = REPO_ROOT / "scripts" / "desktop.py"
+WINDOWS = os.name == "nt"
+
+
+def desktop_targets(paths: list[str], tier: Any | None) -> list[str]:
+    """The paths among `paths` the desktop lint answers for; none with no tier."""
+    if tier is None:
+        return []
+    return [
+        n for n in paths if n.endswith(DESKTOP_SUFFIXES) or n.rsplit("/", 1)[-1] in DESKTOP_CONFIGS
+    ]
+
+
+def desktop_section(tier: Any | None, changed: list[str], scoped: bool) -> str:
+    """The desktop lint's artifact section, with its own log inlined on a failure.
+
+    Off Windows, or with no `dotnet`, it is a missing host, not a finding: the PR gate's
+    Windows job, on the SDK `global.json` pins, is where the tier is gated, and a Linux
+    runner's own `dotnet` is whichever one its image carries. No driver is a tree whose
+    gated files have not been pulled yet.
+    """
+    if tier is None or (scoped and not changed):
+        return ""
+    if not DESKTOP_DRIVER.is_file():
+        print("  desktop: scripts/desktop.py missing — skipped (run sync-devkit.py --pull)")
+        return ""
+    if not WINDOWS:
+        print("  desktop: the desktop tier needs Windows — skipped")
+        return ""
+    if not shutil.which("dotnet"):
+        print("  desktop: no dotnet on PATH — skipped (install the SDK global.json names)")
+        return ""
+    section = run_tool(
+        "desktop", [sys.executable, str(DESKTOP_DRIVER), "lint"], "python scripts/desktop.py lint"
+    )
+    log = REPO_ROOT / "logs" / "desktop-lint.log"
+    if section and log.is_file():
+        section = section.rstrip("\n") + "\n" + log.read_text(encoding="utf-8") + "\n"
+    return section
 
 
 def frontend_targets(paths: list[str], tier: Any | None) -> list[str]:
@@ -357,19 +448,17 @@ def _parser() -> argparse.ArgumentParser:
         default=[],
         help="lint exactly these files, scoped as --changed is (used by /ship)",
     )
-    # Accepted, and a no-op here: this project has no detect-secrets pass to skip.
     # The Stop hook (`scripts/hooks/stop.py`) passes `--no-secrets` unconditionally,
-    # because a project whose lint runner *does* have one must skip it on every turn —
-    # secrets scanning is the pre-commit hook's job and running it churns
-    # `.secrets.baseline`. stop.py is vendored byte-identical and cannot introspect
-    # this file, so parsing the flag is part of the contract between the two. Omitting
-    # it is not a silent no-op: argparse rejects the unknown flag and exits 2, which
-    # the Stop hook reports as a lint failure on *every* stop, with a usage message
-    # instead of a finding and nothing in the source tree that can fix it.
+    # because a per-turn run must not spend seconds on the secrets pass. stop.py is
+    # vendored byte-identical and cannot introspect this file, so parsing the flag is part
+    # of the contract between the two. Omitting it is not a silent no-op: argparse rejects
+    # the unknown flag and exits 2, which the Stop hook reports as a lint failure on
+    # *every* stop, with a usage message instead of a finding and nothing in the source
+    # tree that can fix it.
     parser.add_argument(
         "--no-secrets",
         action="store_true",
-        help="skip the secrets pass (accepted for Stop-hook compatibility; no-op here)",
+        help="skip the detect-secrets pass a --changed or --paths run makes",
     )
     return parser
 
@@ -401,7 +490,10 @@ def main(argv: list[str] | None = None) -> int:
     envs = env_files(changed)
     tier = frontend_tier()
     scripts = frontend_targets(selected, tier)
-    if scoped and not (targets or envs or scripts):
+    desktop = harness_tier("desktop")
+    sources = desktop_targets(selected, desktop)
+    secrets = secrets_targets(selected, args.no_secrets)
+    if scoped and not any((targets, envs, scripts, sources, secrets)):
         return nothing_to_do(selected)
 
     label = f"{len(selected)} file(s)" if scoped else "whole repo"
@@ -418,6 +510,8 @@ def main(argv: list[str] | None = None) -> int:
     if envs:
         sections += run_tool("dotenv-linter", [*DOTENV_CMD, *envs], " ".join([*DOTENV_CMD, *envs]))
     sections += frontend_section(tier, scripts, scoped)
+    sections += desktop_section(desktop, sources, scoped)
+    sections += secrets_section(secrets)
     return _finish(sections)
 
 
@@ -504,11 +598,24 @@ def _python_passes(targets: list[str], scoped: bool) -> str:
         [sys.executable, "-m", "ruff", "check", *scope, "--output-format=full"],
         "ruff check . --fix --unsafe-fixes",
     )
+    scope_dirs = mypy_scope()
+    if not (targets or scope_dirs):
+        return sections
     return sections + run_tool(
         "mypy",
-        [sys.executable, "-m", "mypy", *(targets or MYPY_SCOPE), "--show-error-codes"],
+        [sys.executable, "-m", "mypy", *(targets or scope_dirs), "--show-error-codes"],
         f"mypy {' '.join(MYPY_SCOPE)} --show-error-codes",
     )
+
+
+def mypy_scope() -> list[str]:
+    """`MYPY_SCOPE` minus the directories holding no Python.
+
+    mypy exits 2 on a directory with no `.py` in it, which would report a usage error no
+    source edit can fix -- and a desktop project's app and tests are C#, so a whole-repo
+    run there has nothing of its own to type-check. A changed script is still a target.
+    """
+    return [d for d in MYPY_SCOPE if next((REPO_ROOT / d).rglob("*.py"), None) is not None]
 
 
 def _write_artifact(sections: str) -> None:
