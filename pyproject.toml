@@ -1,15 +1,25 @@
 [project]
 name = "photolab"
 version = "0.1.0"
-description = "Improve photos and distribute them on social media platforms."
+description = "An audited photo album: annotate once, and make realistic new photos from real ones."
 requires-python = ">=3.12"
 dependencies = [
-  "sqlalchemy>=2.0",
+  "sqlalchemy[asyncio]>=2.0",
   "psycopg[binary]>=3.2",
   # 1.17: `alembic.ini`'s ruff hooks are `type = module`, which arrived there.
   "alembic>=1.17",
   "redis>=5.0",
   "pydantic-settings>=2.4",
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.30",
+  "anthropic>=1.0",
+  "httpx>=0.27",
+  "pillow>=10.4",
+  "pillow-heif>=0.18",
+  "numpy>=2.0",
+  "opencv-python-headless>=4.10",
+  "rembg>=2.0.57",
+  "onnxruntime>=1.19",
 ]
 
 [project.optional-dependencies]
@@ -25,6 +35,8 @@ dev = [
   # so the version is pinned with everything else, and so `session-start.sh` can wire the
   # git hook right after `uv sync` without a separate bootstrap step.
   "pre-commit>=4.6",
+  "pytest-asyncio>=0.24",
+  "python-dotenv>=1.2.4",
 ]
 
 [build-system]
@@ -42,7 +54,9 @@ testpaths = ["tests/"]
 # `-p devkit_temproot` is the vendored plugin giving each run a temp root of its own, so a
 # run elsewhere on the machine cannot fail this one at exit; `pythonpath` is where it lives.
 addopts = "-p devkit_temproot"
-pythonpath = ["scripts/pytest-plugins"]
+pythonpath = [".", "scripts/pytest-plugins"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 
 [tool.mypy]
 python_version = "3.12"

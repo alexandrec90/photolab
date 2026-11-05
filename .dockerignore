@@ -24,6 +24,7 @@ logs
 artifacts
 reports
 data
+photos
 
 node_modules
 frontend/dist

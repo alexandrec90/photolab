@@ -44,36 +44,59 @@ services:
       retries: 5
     mem_limit: 256m
 
+  # Behind a profile, because the album normally runs on the host (`scripts/album.py`), on
+  # these same ports, and a plain `up` from devkit's "Docker: Start Stack" must not take them.
+  # `docker compose --profile full up -d` runs it all here, with no AI images.
   app:
+    profiles: ["full"]
     build:
       context: .
       target: dev
     restart: unless-stopped
     env_file: .env
+    # Migrations first, so a pull that changes the schema needs no extra step.
+    command: ["sh", "-c", "alembic upgrade head && python -m photolab serve --host 0.0.0.0"]
+    environment:
+      # `.env` holds the host's view of the stack; inside it, the services have names.
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-photolab}:${POSTGRES_PASSWORD:-photolab_local_dev}@db:5432/${POSTGRES_DB:-photolab}
+      REDIS_URL: redis://redis:6379/0
+      PHOTO_LIBRARY_DIR: /photos
+      PHOTOLAB_DATA_DIR: /data
+      REMBG_HOME: /models
     ports:
-      - "${APP_HOST_PORT:-8007}:8000"
+      # Loopback only. This API serves private photos and has no login, so publishing it
+      # on every interface would hand the album to anyone on the same network.
+      - "127.0.0.1:${APP_HOST_PORT:-8007}:8000"
     volumes:
       # Bind-mounted for live reload. The venv stays in an anonymous volume so the
       # host's (Windows) .venv never shadows the container's (Linux) one.
       - .:/app
       - /app/.venv
+      # Read-only, so nothing here can ever alter an original.
+      - ${PHOTO_LIBRARY_HOST_DIR:-./photos}:/photos:ro
+      - ${PHOTOLAB_DATA_HOST_DIR:-./data}:/data
+      # A volume, so the model's 1 GB survives a rebuild and is shared by no one's checkout.
+      - models:/models
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
-    mem_limit: 1g
+    # Matting is the peak. See "Matting" in README.md for what each model needs.
+    mem_limit: ${APP_MEM_LIMIT:-3g}
 
   frontend:
+    profiles: ["full"]
     image: node:22-alpine
     working_dir: /app
-    command: npm run dev -- --host 0.0.0.0
+    # The bare `node_modules` volume starts empty, and a `dev` with nothing installed dies.
+    command: sh -c "npm install --no-audit --no-fund && npm run dev -- --host 0.0.0.0"
     ports:
-      - "${FRONTEND_HOST_PORT:-5180}:5173"
+      - "127.0.0.1:${FRONTEND_HOST_PORT:-5180}:5173"
     environment:
       # Vite HMR does not see writes through a Windows bind mount without polling.
       CHOKIDAR_USEPOLLING: "true"
-      VITE_API_BASE_URL: http://localhost:${APP_HOST_PORT:-8007}
+      API_PROXY_TARGET: http://app:8000
     volumes:
       - ./frontend:/app
       - node_modules:/app/node_modules
@@ -82,3 +105,4 @@ services:
 volumes:
   pgdata:
   node_modules:
+  models:
