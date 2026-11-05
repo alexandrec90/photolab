@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -45,6 +46,10 @@ _DEFAULT_FRONTEND_PORT = "5180"
 # A first run downloads Python packages and may install the frontend.
 _READY_TIMEOUT_SECONDS = 180
 _POLL_SECONDS = 0.5
+
+# How long a stopping server gets to finish before it is killed, and how often that is checked.
+_STOP_GRACE_SECONDS = 5.0
+_STOP_POLL_SECONDS = 0.02
 
 # Windows: the right to wait on a process, and "wait forever".
 _SYNCHRONIZE = 0x0010_0000
@@ -101,12 +106,25 @@ def server_commands(
     ]
 
 
-def stop_tree(server: subprocess.Popen[Any]) -> None:
-    """End a server and whatever it started.
+if sys.platform != "win32":
 
-    On Windows what Popen holds may only be a parent: `node` can be nvm's shim, a venv's
-    `python` is a redirector, and `uv` is another layer. Ending that alone leaves the real
-    server holding its port.
+    def _signal_group(group: int, signum: int) -> bool:
+        """Send `signum` to a process group: False if nothing is left. Signal 0 only asks."""
+        try:
+            os.killpg(group, signum)
+        except ProcessLookupError:
+            return False
+        return True
+
+
+def stop_tree(server: subprocess.Popen[Any], grace: float = _STOP_GRACE_SECONDS) -> None:
+    """End a server and whatever it started, and return once they have gone.
+
+    What Popen holds may only be a parent: on Windows `node` can be nvm's shim and a venv's
+    `python` is a redirector, and `uv` is another layer everywhere. Ending that alone leaves
+    the real server holding its port. So Windows ends the tree, and elsewhere `run_servers`
+    gives each server a session of its own, whose process group this signals: first politely,
+    then, for whatever is left after `grace` seconds, not.
     """
     if sys.platform == "win32":
         subprocess.run(
@@ -115,7 +133,13 @@ def stop_tree(server: subprocess.Popen[Any]) -> None:
             check=False,
         )
     else:
-        server.terminate()
+        for signum in (signal.SIGTERM, signal.SIGKILL):
+            deadline = time.monotonic() + grace
+            alive = _signal_group(server.pid, signum)
+            while alive and time.monotonic() < deadline:
+                time.sleep(_STOP_POLL_SECONDS)
+                server.poll()  # The leader counts as the group until it is reaped.
+                alive = _signal_group(server.pid, 0)
     server.wait()
 
 
@@ -162,8 +186,10 @@ def run_servers(
     commands: list[tuple[list[str], Path]], env: dict[str, str], stop: threading.Event
 ) -> int:
     """Run both until either stops, or `stop` is set, and then stop what is left."""
+    # Windows ignores `start_new_session`. Elsewhere it is what lets `stop_tree` reach the tree.
     servers: list[subprocess.Popen[Any]] = [
-        subprocess.Popen(command, cwd=cwd, env=env) for command, cwd in commands
+        subprocess.Popen(command, cwd=cwd, env=env, start_new_session=True)
+        for command, cwd in commands
     ]
     try:
         while not stop.is_set() and all(server.poll() is None for server in servers):

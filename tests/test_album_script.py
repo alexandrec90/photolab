@@ -5,7 +5,10 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
+
+import pytest
 
 SCRIPT = Path(__file__).parent.parent / "scripts" / "album.py"
 
@@ -150,6 +153,22 @@ def test_stopping_a_server_stops_what_it_started(tmp_path):
     except OSError:
         return
     raise AssertionError("the real server outlived the stop")
+
+
+def test_stopping_a_server_kills_what_will_not_stop(tmp_path):
+    port_file = tmp_path / "port"
+    stubborn = "import signal; signal.signal(signal.SIGTERM, signal.SIG_IGN); " + HOLDER
+    server = subprocess.Popen(  # noqa: S603 - this test's own constants, not input
+        [sys.executable, "-c", WRAPPER, stubborn, str(port_file)], start_new_session=True
+    )
+    deadline = time.monotonic() + 10
+    while not (port_file.exists() and port_file.read_text()) and time.monotonic() < deadline:
+        time.sleep(0.02)
+
+    album.stop_tree(server, grace=0.5)
+
+    with pytest.raises(OSError):
+        socket.create_connection(("127.0.0.1", int(port_file.read_text())), timeout=1).close()
 
 
 def test_stop_tree_is_harmless_on_a_server_that_already_ended():
