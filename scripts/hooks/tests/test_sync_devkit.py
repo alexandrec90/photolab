@@ -494,6 +494,75 @@ def test_pull_receipt_preserves_a_locally_edited_retired_file(tmp_path, monkeypa
     assert (repo / "scripts/old.py").read_text() == "local edit"
 
 
+def _older_release(root: Path) -> Path:
+    """A source whose own list stops short of the running one's."""
+    _seed(root, "scripts/kept.py", "kept")
+    _seed(root, "scripts/devkit_manifest.py", 'MANIFEST = ("scripts/kept.py",)\n')
+    return root
+
+
+def test_as_the_source_lists_it_drops_only_what_its_own_list_omits(tmp_path, monkeypatch):
+    older = _older_release(tmp_path / "older")
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/kept.py", "scripts/new.py"))
+    gated = "src/worktreePort.ts"  # a consumer's own path, in no MANIFEST on either side
+    wanted = ("scripts/kept.py", "scripts/new.py", gated)
+    assert sh.as_the_source_lists_it(older, wanted) == ("scripts/kept.py", gated)
+    assert sh.as_the_source_lists_it(tmp_path / "no-list", wanted) == wanted
+
+
+def test_a_pull_from_an_older_release_leaves_no_orphan(tmp_path, monkeypatch, capsys):
+    """ba73e7c3: the newer list named a rule the older release has never heard of. It was
+    reported `(absent)`, stayed in the tree, and no later `--check` could see it."""
+    newer = tmp_path / "newer"
+    _seed(newer, "scripts/kept.py", "kept")
+    _seed(newer, "scripts/new.py", "new")
+    repo = tmp_path / "proj"
+    monkeypatch.setattr(sh, "REPO_ROOT", repo)
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/kept.py", "scripts/new.py"))
+    assert sh.main(["--pull", "--src", str(newer), "--allow-untagged"]) == 0
+
+    older = _older_release(tmp_path / "older")
+    assert sh.main(["--pull", "--src", str(older), "--allow-untagged"]) == 0
+    assert not (repo / "scripts/new.py").exists()
+    assert (repo / "scripts/kept.py").is_file()
+    assert "(absent)" not in capsys.readouterr().out
+
+
+def test_a_pull_from_an_older_release_keeps_a_local_edit_to_what_it_never_listed(
+    tmp_path, monkeypatch
+):
+    newer = tmp_path / "newer"
+    _seed(newer, "scripts/kept.py", "kept")
+    _seed(newer, "scripts/new.py", "new")
+    repo = tmp_path / "proj"
+    monkeypatch.setattr(sh, "REPO_ROOT", repo)
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/kept.py", "scripts/new.py"))
+    assert sh.main(["--pull", "--src", str(newer), "--allow-untagged"]) == 0
+    _seed(repo, "scripts/new.py", "local edit")
+
+    older = _older_release(tmp_path / "older")
+    assert sh.main(["--pull", "--src", str(older), "--allow-untagged"]) == 0
+    assert (repo / "scripts/new.py").read_text() == "local edit"
+
+
+def test_a_source_that_merely_lacks_a_file_deletes_nothing(tmp_path, monkeypatch, capsys):
+    """A wrong `--src` looks like this. With no list of its own the source said nothing
+    about what is retired, so the file stays and the report stays."""
+    full = tmp_path / "full"
+    _seed(full, "scripts/kept.py", "kept")
+    _seed(full, "scripts/new.py", "new")
+    repo = tmp_path / "proj"
+    monkeypatch.setattr(sh, "REPO_ROOT", repo)
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/kept.py", "scripts/new.py"))
+    assert sh.main(["--pull", "--src", str(full), "--allow-untagged"]) == 0
+
+    thin = tmp_path / "thin"
+    _seed(thin, "scripts/kept.py", "kept")
+    assert sh.main(["--pull", "--src", str(thin), "--allow-untagged"]) == 0
+    assert (repo / "scripts/new.py").is_file()
+    assert "(absent) scripts/new.py" in capsys.readouterr().out
+
+
 # --- retirement has to leave the *directory* gone too -----------------------
 # Every retired skill that shipped a `.py` had run at least once, so it left a
 # `__pycache__/` behind. That husk is gitignored, so it is invisible to `git status`
@@ -1917,7 +1986,46 @@ def test_devkits_own_paths_for_the_gated_tier_never_depend_on_a_consumer():
     assert sh.gated_source_paths() == (
         "frontend/src/worktreePort.ts",
         "frontend/src/worktreePort.test.ts",
+        "scripts/desktop.py",
+        "scripts/hooks/tests/test_desktop.py",
     )
+
+
+DESKTOP_ON = '[desktop]\nenabled = true\nsolution = "App.slnx"\n'
+DESKTOP_FILES = ("scripts/desktop.py", "scripts/hooks/tests/test_desktop.py")
+
+
+def test_the_desktop_gate_delivers_its_files_from_the_repo_root(tmp_path):
+    """The second gate, and the reason `gated_paths` became a loop: its files are named
+    from the root on both sides, so a consumer holds them where devkit does."""
+    on = _consumer(tmp_path / "desk", DESKTOP_ON)
+    assert sh.desktop_on(on) is True
+    assert sh.gate_prefixes(on) == {"desktop": ""}
+    assert sh.gated_paths(on) == DESKTOP_FILES
+    assert sh.source_map(on) == {}, "the same path on both sides needs no translation"
+
+
+def test_the_two_gates_resolve_independently(tmp_path):
+    """One tier on says nothing about the other: a desktop project gets no Vite helper,
+    and a project with both gets both, each at its own prefix."""
+    both = _consumer(tmp_path / "both", ON_WEB + DESKTOP_ON)
+    assert sh.gated_paths(both) == (
+        "web/src/worktreePort.ts",
+        "web/src/worktreePort.test.ts",
+        *DESKTOP_FILES,
+    )
+    desk = _consumer(tmp_path / "desk", DESKTOP_ON)
+    assert set(sh.gated_source_paths_off(desk)) == {
+        "frontend/src/worktreePort.ts",
+        "frontend/src/worktreePort.test.ts",
+    }
+
+
+def test_a_desktop_tier_typo_is_off(tmp_path):
+    """`enabled = "yes"` must not vendor a release driver into the project."""
+    typo = _consumer(tmp_path / "typo", '[desktop]\nenabled = "yes"\n')
+    assert sh.desktop_on(typo) is False
+    assert sh.gated_paths(typo) == ()
 
 
 def _gated_expectations(root: Path, vendored: bool) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -1932,17 +2040,13 @@ def _gated_expectations(root: Path, vendored: bool) -> tuple[tuple[str, ...], tu
     if not vendored:
         # devkit itself. The question is about ITS copy, so ask at devkit's layout.
         return sh.gated_source_paths(), ()
-    # A consumer. `gated_paths` already answers both halves: the paths at THIS project's
-    # layout when the tier is on, and empty when it is off. devkit keeps the file under
-    # `frontend/src/`; a project with `dir = "."` and `src = "src/"` holds the same file
-    # at `src/worktreePort.ts`, and asking its disk with devkit's name is asking for
-    # something it was never meant to have.
-    expected = sh.gated_paths(root)
-    if expected:
-        return expected, ()
-    # Tier off, so a leak is looked for at devkit's layout -- where a file delivered by
-    # mistake would have landed.
-    return (), sh.gated_source_paths()
+    # A consumer. `gated_paths` answers the present half at THIS project's layout, for
+    # every tier it turns on. devkit keeps the frontend file under `frontend/src/`; a
+    # project with `dir = "."` and `src = "src/"` holds the same file at
+    # `src/worktreePort.ts`, and asking its disk with devkit's name is asking for
+    # something it was never meant to have. Each tier it keeps off is looked for at
+    # devkit's layout -- where a file delivered by mistake would have landed.
+    return sh.gated_paths(root), sh.gated_source_paths_off(root)
 
 
 def test_a_consumers_gated_path_is_not_devkits_and_the_two_are_not_interchangeable(tmp_path):
@@ -1966,7 +2070,8 @@ def test_a_consumers_gated_path_is_not_devkits_and_the_two_are_not_interchangeab
 
     # Where a consumer's layout DOES match devkit's the two agree, which is why the bug
     # survived review and every default-layout project's gate stayed green.
-    assert sh.gated_paths(_consumer(tmp_path / "same", ON)) == sh.gated_source_paths()
+    same = _consumer(tmp_path / "same", ON)
+    assert sh.gated_paths(same) + sh.gated_source_paths_off(same) == sh.gated_source_paths()
 
 
 def test_the_on_disk_check_asks_a_flat_consumer_for_its_own_path(tmp_path):
@@ -1984,7 +2089,7 @@ def test_the_on_disk_check_asks_a_flat_consumer_for_its_own_path(tmp_path):
     present, absent = _gated_expectations(flat, vendored=True)
 
     assert present == ("src/worktreePort.ts", "src/worktreePort.test.ts")
-    assert absent == ()
+    assert absent == DESKTOP_FILES, "only the tier it keeps off is looked for as a leak"
     assert "frontend/src/worktreePort.ts" not in present
 
 
@@ -2273,7 +2378,9 @@ def test_pull_refusal_names_each_refusal_and_each_override(tmp_path, capsys):
 
     untagged = _repo(tmp_path / "untagged")
     assert sh.pull_refusal(untagged, allow_dirty=False, allow_untagged=False) == 2
-    assert "not tagged" in capsys.readouterr().err
+    said = capsys.readouterr().err
+    assert "not tagged" in said
+    assert "--src <a clean clone at that tag>" in said, "b5fabd41: the way through is named"
     assert sh.pull_refusal(untagged, allow_dirty=True, allow_untagged=False) == 2, (
         "--allow-dirty must not excuse an untagged source"
     )
@@ -2537,10 +2644,25 @@ def test_the_path_lists_are_devkit_manifests_own():
     assert sh.MANIFEST is dm.MANIFEST
     assert sh.RETIRED_PATHS is dm.RETIRED_PATHS
     assert sh.GATED_MANIFEST is dm.GATED_MANIFEST
-    assert (sh.FRONTEND_GATE, sh.DEFAULT_FRONTEND_SRC) == (
+    assert (sh.FRONTEND_GATE, sh.DEFAULT_FRONTEND_SRC, sh.DESKTOP_GATE) == (
         dm.FRONTEND_GATE,
         dm.DEFAULT_FRONTEND_SRC,
+        dm.DESKTOP_GATE,
     )
+
+
+def test_every_gate_names_where_devkit_keeps_its_files():
+    """A gate with no prefix entry would resolve from the root by default -- right for the
+    desktop gate, silently wrong for one whose files live under a tier's own source."""
+    assert set(sh.GATED_MANIFEST) == set(sh.DEFAULT_GATE_PREFIX)
+
+
+def test_a_list_that_predates_the_desktop_gate_still_loads():
+    """The list a first pull loads can be the consumer's old one, with no `DESKTOP_GATE`
+    and no desktop entry: the tool must still resolve every gate it knows of."""
+    assert BOOTSTRAP_LISTS.count("DESKTOP_GATE") == 0
+    assert sh.GATED_MANIFEST.get("desktop") is not None
+    assert {"frontend": ()}.get(sh.DESKTOP_GATE, ()) == ()
 
 
 def test_the_list_is_vendored_beside_the_tool_that_reads_it():

@@ -32,10 +32,6 @@ updates:
           - "minor"
           - "patch"
 
-  # NB: this becomes active when `frontend/package.json` exists. The generator
-  # wires the tier but ships no frontend tree, so until you scaffold one Dependabot
-  # reports "no manifest found" for this entry — visible in the repo's Dependabot
-  # insights, not in CI. Delete the entry if this project never grows a frontend.
   - package-ecosystem: npm
     directory: /frontend
     schedule:

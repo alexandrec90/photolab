@@ -49,6 +49,7 @@ import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 # For `project_settings.py`, which the three functions below import **on use** rather
 # than here. A project's very first pull runs the copy of this script the generator
@@ -194,7 +195,27 @@ MANIFEST: tuple[str, ...] = _lists.MANIFEST
 RETIRED_PATHS: tuple[str, ...] = _lists.RETIRED_PATHS
 FRONTEND_GATE: str = _lists.FRONTEND_GATE
 DEFAULT_FRONTEND_SRC: str = _lists.DEFAULT_FRONTEND_SRC
+# `getattr`, because the list a consumer's first pull loads may predate the gate; the
+# spelling is the gate's `.devkit.toml` table either way.
+DESKTOP_GATE: str = getattr(_lists, "DESKTOP_GATE", "desktop")
 GATED_MANIFEST: dict[str, tuple[str, ...]] = _lists.GATED_MANIFEST
+# Where devkit keeps each gate's files. A gate missing here is named from the repo root.
+DEFAULT_GATE_PREFIX: dict[str, str] = {FRONTEND_GATE: DEFAULT_FRONTEND_SRC, DESKTOP_GATE: ""}
+
+
+def _consumer_config(root: Path) -> Any | None:
+    """The consumer's parsed `.devkit.toml`, read through its own vendored helper; None
+    when the helper is not there (the bootstrap pull) or cannot read the file."""
+    module = _load_by_path(
+        "_sync_devkit_harness_config",
+        Path(__file__).resolve().parent / "hooks" / "harness_config.py",
+    )
+    if module is None:
+        return None
+    try:
+        return module.load(root)
+    except (OSError, ValueError, AttributeError, TypeError):
+        return None
 
 
 def frontend_src(root: Path) -> str:
@@ -204,27 +225,36 @@ def frontend_src(root: Path) -> str:
     Normalised to a forward-slash prefix ending in `/`, which is how every path in the
     manifest is spelled, so a gated entry joins onto it without a second spelling.
     """
-    module = _load_by_path(
-        "_sync_devkit_harness_config",
-        Path(__file__).resolve().parent / "hooks" / "harness_config.py",
-    )
-    if module is None:
-        return ""
-    try:
-        frontend = module.load(root).frontend
-    except (OSError, ValueError, AttributeError, TypeError):
-        return ""
-    if not frontend.enabled:
+    frontend = getattr(_consumer_config(root), "frontend", None)
+    if frontend is None or not frontend.enabled:
         return ""
     return str(frontend.src).replace("\\", "/").rstrip("/") + "/"
 
 
+def desktop_on(root: Path) -> bool:
+    """Whether the consumer at `root` turns the `[desktop]` tier on. False where the tier
+    is off, and where the helper reading it predates the tier or is not there yet."""
+    desktop = getattr(_consumer_config(root), "desktop", None)
+    return bool(getattr(desktop, "enabled", False))
+
+
+def gate_prefixes(root: Path) -> dict[str, str]:
+    """`{gate: prefix}` for every gate the consumer at `root` turns on, at its layout."""
+    prefixes: dict[str, str] = {}
+    if src := frontend_src(root):
+        prefixes[FRONTEND_GATE] = src
+    if desktop_on(root):
+        prefixes[DESKTOP_GATE] = DEFAULT_GATE_PREFIX[DESKTOP_GATE]
+    return prefixes
+
+
 def gated_paths(root: Path) -> tuple[str, ...]:
     """The gated entries the consumer at `root` should hold, at that project's layout."""
-    src = frontend_src(root)
-    if not src:
-        return ()
-    return tuple(src + name for name in GATED_MANIFEST[FRONTEND_GATE])
+    return tuple(
+        prefix + name
+        for gate, prefix in gate_prefixes(root).items()
+        for name in GATED_MANIFEST.get(gate, ())
+    )
 
 
 def source_map(root: Path) -> dict[str, str]:
@@ -257,11 +287,27 @@ def gated_source_paths() -> tuple[str, ...]:
 
     For the readers that ask "which files does devkit vendor" about devkit itself --
     the unreleased-change check in `new-project.py` and `upgrade-project.py` -- rather
-    than about a consumer. devkit's own `.devkit.toml` keeps the frontend tier off, so
+    than about a consumer. devkit's own `.devkit.toml` keeps every gated tier off, so
     `manifest_for(devkit)` would answer without these and the release check would wave
     an unreleased edit to them through.
     """
-    return tuple(DEFAULT_FRONTEND_SRC + name for name in GATED_MANIFEST[FRONTEND_GATE])
+    return tuple(
+        DEFAULT_GATE_PREFIX.get(gate, "") + name
+        for gate, names in GATED_MANIFEST.items()
+        for name in names
+    )
+
+
+def gated_source_paths_off(root: Path) -> tuple[str, ...]:
+    """devkit's paths for every gate the consumer at `root` keeps off: where a file the
+    gate should have withheld would have landed, so a leak is looked for there."""
+    on = gate_prefixes(root)
+    return tuple(
+        DEFAULT_GATE_PREFIX.get(gate, "") + name
+        for gate, names in GATED_MANIFEST.items()
+        if gate not in on
+        for name in names
+    )
 
 
 def manifest_for(root: Path) -> tuple[str, ...]:
@@ -1394,7 +1440,8 @@ def pull_refusal(src: Path, allow_dirty: bool, allow_untagged: bool) -> int:
             f"sync-harness: {src} HEAD is not tagged. A consumer pins devkit by "
             f"tag, so an untagged pull can never be pinned to what it vendored. "
             f"Tag the release first, or pass --allow-untagged to pull anyway "
-            f"(leaving {PRECOMMIT_FILE} stale -- and the drift gate red).",
+            f"(leaving {PRECOMMIT_FILE} stale -- and the drift gate red). To adopt a tag "
+            f"this checkout has moved past, pass --src <a clean clone at that tag>.",
             file=sys.stderr,
         )
         return 2
@@ -1471,6 +1518,26 @@ def apply_push(src: Path, manifest: tuple[str, ...]) -> SyncOutcome:
     )
 
 
+def as_the_source_lists_it(src: Path, manifest: tuple[str, ...]) -> tuple[str, ...]:
+    """`manifest` without what this running copy lists and the source's own list does not.
+
+    A pull from a release older than the running copy delivers that release's shorter
+    list, so a path only the newer list named was printed as `(absent)`, left in the tree,
+    and read by no later `--check`: homelab's `.claude/rules/local-e2e.md`, still loaded by
+    Claude Code and removed by hand (ba73e7c3). Dropped here, it is a receipt entry out
+    of the MANIFEST: deleted if untouched, kept if edited, like any retired file.
+
+    Only the source's own list decides. A path merely missing from the source is what a
+    wrong `--src` looks like, and a source with no such list says nothing; both keep the
+    `(absent)` report. Keyed on `MANIFEST`, since a gated path is the consumer's own."""
+    lists = _load_by_path("devkit_manifest_of_source", src / "scripts" / "devkit_manifest.py")
+    listed = getattr(lists, "MANIFEST", None)
+    if not listed:
+        return manifest
+    unlisted = set(MANIFEST) - set(listed)
+    return tuple(rel for rel in manifest if rel not in unlisted)
+
+
 def apply_pull(src: Path, manifest: tuple[str, ...]) -> SyncOutcome:
     """`--pull`: copy upstream's files down, then every side effect adoption needs.
 
@@ -1480,6 +1547,9 @@ def apply_pull(src: Path, manifest: tuple[str, ...]) -> SyncOutcome:
     ordering constraints past the eye and cost complexity 32 in a function whose
     sequence is the only thing a reader is here for.
     """
+    # First: every step below, the deletions above all, has to read the release being
+    # adopted rather than the newer one this running copy came from.
+    manifest = as_the_source_lists_it(src, manifest)
     managed_removed, preserved, unvendored = remove_receipt_retired(REPO_ROOT, manifest, src)
     copied, blocks_written, blocks_failed = copy_manifest(src, manifest, pull=True)
     removed = remove_retired(REPO_ROOT) + managed_removed

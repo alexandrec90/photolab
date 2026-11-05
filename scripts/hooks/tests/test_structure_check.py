@@ -195,6 +195,25 @@ def test_vendored_paths_leave_the_gated_tier_out_where_the_frontend_is_off(tmp_p
     assert sc.vendored_paths(tmp_path) == {"a.py"}
 
 
+DESKTOP_SCRIPT = (
+    'MANIFEST: tuple[str, ...] = (\n    "a.py",\n)\n'
+    "GATED_MANIFEST: dict[str, tuple[str, ...]] = {\n"
+    '    "frontend": ("port.ts",),\n'
+    '    "desktop": ("scripts/desktop.py",),\n}\n'
+)
+
+
+def test_vendored_paths_include_the_desktop_gate_from_the_repo_root(tmp_path):
+    """The desktop gate's files are named from the root, so they are exempt where they
+    landed; the frontend gate, still off, contributes nothing."""
+    write(tmp_path, "DEVKIT_VERSION", "abc\n")
+    write(tmp_path, "scripts/sync-devkit.py", DESKTOP_SCRIPT)
+    write(tmp_path, ".devkit.toml", "[desktop]\nenabled = true\n")
+    assert sc.vendored_paths(tmp_path) == {"a.py", "scripts/desktop.py"}
+    write(tmp_path, ".devkit.toml", "[desktop]\nenabled = false\n")
+    assert sc.vendored_paths(tmp_path) == {"a.py"}
+
+
 def test_a_gated_literal_that_will_not_evaluate_costs_only_the_gated_half(tmp_path):
     """`ast.literal_eval` refuses a `Name` key. The unconditional manifest must still
     be read -- losing the whole exemption over the gated half would redden a consumer
@@ -513,6 +532,33 @@ def test_findings_are_keyed_deduped_and_sorted(tmp_path):
     )
     found = sc.findings(tmp_path, config(limits={"function_params": 1}))
     assert [(f.key, f.value) for f in found] == [("function_params::src/main.py::alpha", 3)]
+
+
+def test_a_module_only_imported_for_its_types_is_not_an_orphan(tmp_path):
+    """a745fee7: photolab's `frontend/src/api/types.ts`, all types and imported by everyone
+    with `import type`, read as dead code because the graph is built for cycles."""
+    write(tmp_path, "src/main.ts", 'import type { Foo } from "./types";\nmain();\n')
+    write(tmp_path, "src/types.ts", "export type Foo = string;\n")
+    assert not [f.key for f in sc.findings(tmp_path, config()) if f.rule == "orphan"]
+
+
+def test_a_python_module_only_imported_under_type_checking_is_not_an_orphan(tmp_path):
+    write(
+        tmp_path,
+        "src/main.py",
+        "from typing import TYPE_CHECKING\n\nif TYPE_CHECKING:\n    from src import shapes\n",
+    )
+    write(tmp_path, "src/shapes.py", "x = 1\n")
+    assert not [f.key for f in sc.findings(tmp_path, config()) if f.rule == "orphan"]
+    write(tmp_path, "src/unused.py", "x = 1\n")
+    found = [f.key for f in sc.findings(tmp_path, config()) if f.rule == "orphan"]
+    assert found == ["orphan::src/unused.py"], "the rule still finds what nothing uses"
+
+
+def test_type_only_imports_still_close_no_cycle(tmp_path):
+    write(tmp_path, "src/a.ts", 'import type { B } from "./b";\nexport type A = B;\n')
+    write(tmp_path, "src/b.ts", 'import { a } from "./a";\nexport type B = typeof a;\n')
+    assert not [f for f in sc.findings(tmp_path, config()) if f.rule == "cycle"]
 
 
 def test_findings_honour_disabled_rules(tmp_path):

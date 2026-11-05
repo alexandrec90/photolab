@@ -167,6 +167,10 @@ MANIFEST: tuple[str, ...] = (
     ".claude/rules/authoring.md",
     # What a coding session leaves to the fix pass: commit, push, PR, the full suite.
     ".claude/rules/session-scope.md",
+    # Where a test only this workstation can run goes, and the `scripts/e2e.py` contract
+    # devkit's nightly `devkit-local-e2e` job runs in every checkout. Path-scoped to test
+    # files, so it costs the always-loaded tier nothing.
+    ".claude/rules/local-e2e.md",
     # The policy's reference half, and a fixer session's own instructions. Vendored as
     # pointer targets: the rules above cite both. Both sit *outside* `.claude/rules/`,
     # where every `.md` is loaded into every session -- which neither may be.
@@ -330,6 +334,9 @@ RETIRED_PATHS: tuple[str, ...] = (
 # for most consumers and absent from every MANIFEST entry.
 FRONTEND_GATE = "frontend"
 DEFAULT_FRONTEND_SRC = "frontend/src/"
+# The `[desktop]` tier's gate. Its entries are named from the repo root on both sides,
+# so the prefix is empty and `source_map` never needs a translation for them.
+DESKTOP_GATE = "desktop"
 # A LITERAL dict, keys spelled as strings: `structure_check.vendored_paths` reads this
 # off the source with `ast.literal_eval` in every consumer, and a `Name` key would make
 # the whole literal unreadable there -- silently, as an empty exemption.
@@ -338,4 +345,8 @@ GATED_MANIFEST: dict[str, tuple[str, ...]] = {
     # contract (`tests/test_worktree_port.py`), so it drops into any Vite project, and
     # held equal to `scripts/hooks/worktree_tiers.py` by the same test.
     "frontend": ("worktreePort.ts", "worktreePort.test.ts"),
+    # How a desktop app is linted, tested, packed and published -- the one copy of that
+    # recipe every desktop project shares, so a fix to the release reaches all of them on
+    # their next `--pull` rather than staying in whichever template rendered them.
+    "desktop": ("scripts/desktop.py", "scripts/hooks/tests/test_desktop.py"),
 }
