@@ -53,7 +53,12 @@ testpaths = ["tests/"]
 # No `-q` in `addopts`: an agent adds its own, and `-qq` drops the "N passed" line.
 # `-p devkit_temproot` is the vendored plugin giving each run a temp root of its own, so a
 # run elsewhere on the machine cannot fail this one at exit; `pythonpath` is where it lives.
-addopts = "-p devkit_temproot"
+# `-m "not local"` keeps the local end-to-end tier out of every run but `scripts/e2e.py`'s,
+# whose own `-m local` comes later and replaces it (`.claude/rules/local-e2e.md`).
+addopts = "-p devkit_temproot -m \"not local\""
+markers = [
+  "local: needs this workstation (the Docker daemon, node, this checkout's .env); run by scripts/e2e.py and deselected everywhere else",
+]
 pythonpath = [".", "scripts/pytest-plugins"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
