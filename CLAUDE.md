@@ -111,8 +111,13 @@ here is a fork that will disagree with it the first time either is edited.
   what `node` and a venv's `python` really are. Run `scripts/album.py` after changing how
   anything starts or stops, or `python scripts/e2e.py`, whose `tests/test_album_e2e.py`
   does it for you: opened natively, scanned through Vite's proxy, stopped by its terminal.
-- **A test that needs this machine is marked `local`.** `addopts` deselects it from every
-  run but `scripts/e2e.py`'s, which devkit's nightly job runs (`.claude/rules/local-e2e.md`).
+- **A test that needs this machine is marked `local`; one a hosted runner can run is
+  `ci_e2e`.** `addopts` deselects both from every run but `scripts/e2e.py`'s: devkit's
+  nightly job runs the `local` tier (`.claude/rules/local-e2e.md`), and the `PR Gate`'s
+  `E2E` job runs `scripts/e2e.py --ci` on each default-branch commit, on ubuntu-latest with
+  Docker, node and a `.env` copied from `.env.example`. `tests/test_album_e2e.py` carries
+  both: Linux shows the album opening, scanning and stopping, and only this machine shows
+  the Windows half.
 - **Never widen what `agents.py` passes to a CLI.** The owner's own Codex config is
   `danger-full-access`, and `--ignore-user-config` is what keeps that away from anything a
   photo might say.

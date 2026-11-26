@@ -172,6 +172,33 @@ def test_pytest_argv_runs_named_ids_in_place_of_the_whole_tier(tmp_path: Path):
     assert argv[3:6] == ["tests/test_album_e2e.py::test_x", "-m", "local"]
 
 
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        ([], (e2e.MARKER, [])),
+        (["t.py::a"], (e2e.MARKER, ["t.py::a"])),
+        (["--ci"], (e2e.CI_MARKER, [])),
+        (["--ci", "t.py::a"], (e2e.CI_MARKER, ["t.py::a"])),
+        (["t.py::a", "--ci"], (e2e.CI_MARKER, ["t.py::a"])),
+    ],
+)
+def test_split_args_picks_the_tier_and_keeps_the_ids(argv, expected):
+    assert e2e.split_args(argv) == expected
+
+
+def test_pytest_argv_selects_the_ci_tier_when_asked(tmp_path: Path):
+    argv = e2e.pytest_argv("py", tmp_path / "r.xml", marker=e2e.CI_MARKER)
+
+    assert argv[argv.index("tests") + 1 : argv.index("tests") + 3] == ["-m", "ci_e2e"]
+
+
+def test_verdict_names_the_ci_tier_when_it_executed_nothing():
+    code, lines = e2e.verdict(0, [], strict=True, marker=e2e.CI_MARKER)
+
+    assert code != 0
+    assert lines[-1] == "e2e: no ci_e2e test executed, which is not a pass"
+
+
 def fake_runner(report: Path, code: int, body: str | None, calls: list[dict[str, Any]]):
     def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         calls.append({"argv": argv, **kwargs})
@@ -214,6 +241,35 @@ def test_main_is_red_under_the_scheduler_for_a_skip(isolated: Path):
     assert e2e.main([], runner=fake_runner(isolated, 0, body, []), env={"DEVKIT_E2E": "1"}) != 0
 
 
+def test_main_with_ci_runs_the_ci_tier_under_the_same_contract(isolated: Path, capsys):
+    calls: list[dict[str, Any]] = []
+
+    code = e2e.main(["--ci"], runner=fake_runner(isolated, 1, REPORT, calls), env={})
+
+    argv = calls[0]["argv"]
+    assert argv[argv.index("-m", 3) + 1] == "ci_e2e"
+    assert "--ci" not in argv
+    assert code == 1
+    assert "FAILED tests/test_album_e2e.py::test_scans - AssertionError: no photo" in (
+        capsys.readouterr().out
+    )
+
+
+def test_main_with_ci_fails_a_skip_under_devkit_e2e(isolated: Path):
+    body = REPORT.replace("<failure", "<!--").replace("</failure>", "-->")
+    body = body.replace("<error", "<!--").replace("</error>", "-->")
+    strict = {"DEVKIT_E2E": "1"}
+
+    assert e2e.main(["--ci"], runner=fake_runner(isolated, 0, body, []), env=strict) != 0
+
+
+def test_main_with_ci_is_red_when_nothing_ran(isolated: Path, capsys):
+    code = e2e.main(["--ci"], runner=fake_runner(isolated, 0, None, []), env={})
+
+    assert code != 0
+    assert "no ci_e2e test executed" in capsys.readouterr().out
+
+
 def test_main_is_red_when_pytest_wrote_no_report_even_with_a_stale_one(isolated: Path, capsys):
     isolated.parent.mkdir()
     write_report(isolated, REPORT.replace("<failure", "<!--").replace("</failure>", "-->"))
@@ -229,11 +285,12 @@ def test_the_default_run_deselects_the_tier_and_registers_its_marker():
     options = config["tool"]["pytest"]["ini_options"]
     addopts = shlex.split(options["addopts"])
 
-    assert addopts[addopts.index("-m") + 1] == "not local"
-    assert any(marker.startswith(f"{e2e.MARKER}:") for marker in options["markers"])
+    assert addopts[addopts.index("-m") + 1] == "not local and not ci_e2e"
+    for tier in (e2e.MARKER, e2e.CI_MARKER):
+        assert any(marker.startswith(f"{tier}:") for marker in options["markers"])
 
 
-def test_the_album_e2e_test_is_in_the_tier():
+def test_the_album_e2e_test_is_in_both_tiers():
     tree = ast.parse((ROOT / "tests" / "test_album_e2e.py").read_text(encoding="utf-8"))
     marks = [
         ast.unparse(node.value)
@@ -242,4 +299,13 @@ def test_the_album_e2e_test_is_in_the_tier():
         and any(isinstance(t, ast.Name) and t.id == "pytestmark" for t in node.targets)
     ]
 
-    assert marks == ["pytest.mark.local"]
+    assert marks == ["[pytest.mark.local, pytest.mark.ci_e2e]"]
+
+
+def test_the_pr_gate_runs_the_ci_tier_on_the_default_branch_only():
+    gate = (ROOT / ".github" / "workflows" / "pr-gate.yml").read_text(encoding="utf-8")
+    job = gate[gate.index("\n  e2e:") :]
+
+    assert "uv run python scripts/e2e.py --ci" in job
+    assert "github.event_name != 'pull_request'" in job
+    assert "needs: devkit-drift" in job
