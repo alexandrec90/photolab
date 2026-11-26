@@ -181,3 +181,61 @@ jobs:
         env:
           DEVKIT_DIR: ${{ github.workspace }}/.devkit-src
         run: python scripts/sync-devkit.py --check
+
+  e2e:
+    name: E2E
+    # The default branch only: PRs merge without waiting for a gate, so a PR run of this
+    # would decide nothing. After the drift job, whatever it said, so a push run does not
+    # take one more runner at once. A burst of merges collapses to the newest commit; the
+    # older run's conclusion is then `cancelled`, which devkit's fix trigger reads as no
+    # verdict rather than a red. A red here is a red `PR Gate` on the default branch, which
+    # is what the fix pass reads.
+    needs: devkit-drift
+    if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+    # Linux: the album's Postgres is a Linux image `scripts/album.py` starts with compose,
+    # which a Windows runner's Docker cannot run. What only Windows shows stays `local`.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: ${{ github.workflow }}-e2e-${{ github.ref }}
+      cancel-in-progress: true
+    env:
+      # What devkit's scheduler sets: under it a skip in the tier is a failure.
+      DEVKIT_E2E: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-python-env
+        with:
+          # Explicit at every call site: the action is copied from devkit verbatim
+          # rather than rendered, so its own default cannot know this project's version.
+          python-version: "3.12"
+      - uses: actions/setup-node@v6
+        with:
+          # The major docker-compose.yml's `frontend` service runs.
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install the frontend
+        # `scripts/album.py` installs it itself when it is missing; `npm ci` here installs
+        # what the lock says rather than what resolves today.
+        run: npm ci --prefix frontend --no-audit --no-fund
+      - name: A .env from the template
+        # Placeholders only: no test in this tier reaches a network or spends a plan
+        # (CLAUDE.md, "Testing"), and the test points the album at its own library.
+        run: cp .env.example .env
+      - name: Pull the album's Postgres from the mirror
+        # docker-compose.yml names `postgres:18`, which compose would pull from Docker
+        # Hub, whose anonymous quota a shared runner IP spends (tests/test_workflow_images.py
+        # in devkit). Tagged as compose names it, so `up` finds it and pulls nothing.
+        run: |
+          docker pull mirror.gcr.io/library/postgres:18
+          docker tag mirror.gcr.io/library/postgres:18 postgres:18
+      - name: End-to-end tier
+        run: uv run python scripts/e2e.py --ci
+      - name: Upload e2e artifact
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-failures
+          path: logs/e2e-junit.xml
+          if-no-files-found: ignore

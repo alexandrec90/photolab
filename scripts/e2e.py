@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
-"""The local end-to-end tier: every test that needs this workstation, not a runner.
+"""The end-to-end tiers: the tests that start the album for real, here or on a runner.
 
 The contract `.claude/rules/local-e2e.md` states, which devkit's nightly `devkit-local-e2e`
 job runs in this checkout: exit 0 green, anything else red, each failure printed as a
-`FAILED <id>` line. It runs the tests marked `local`, which `addopts` deselects from every
-other run, CI's included: they need the Docker daemon, node and this checkout's `.env`,
-and they start the album natively the way `scripts/album.py` does, which is the run the
-Docker stack never showed (CLAUDE.md, "The Docker run hides Windows").
+`FAILED <id>` line. With no flag it runs the tests marked `local`, which need this
+workstation: they start the album natively on Windows the way `scripts/album.py` does,
+which is the run the Docker stack never showed (CLAUDE.md, "The Docker run hides Windows").
+
+`--ci` runs the tests marked `ci_e2e` instead, under the same contract: end-to-end tests a
+hosted runner can run, which the `PR Gate` workflow's `E2E` job runs on the default branch
+with Docker, node and a `.env` built from `.env.example`. `addopts` deselects both markers
+from every other run. A test may carry both, when a Linux runner shows most of what it
+checks and only this workstation shows the rest.
 
 **A skip is a failure under the scheduler** (`DEVKIT_E2E` set): the checkout is the one
 the tests were written for, so nothing has a reason left to skip. By hand a skip is listed
@@ -24,8 +29,9 @@ is why the script itself is stdlib only (`.claude/rules/task-scripts.md`). The j
 report stays in `logs/e2e-junit.xml`.
 
 Usage:
-    python scripts/e2e.py                                      # the whole tier
+    python scripts/e2e.py                                      # the whole local tier
     python scripts/e2e.py tests/test_album_e2e.py::test_x      # those alone, still in the tier
+    python scripts/e2e.py --ci                                 # the tier CI runs
 """
 
 from __future__ import annotations
@@ -44,6 +50,8 @@ REPORT = REPO_ROOT / "logs" / "e2e-junit.xml"
 # Spelled as devkit's `e2e-pass.ENV_FLAG` spells it.
 ENV_FLAG = "DEVKIT_E2E"
 MARKER = "local"
+CI_MARKER = "ci_e2e"
+CI_FLAG = "--ci"
 
 PASSED = "passed"
 FAILED = "failed"
@@ -107,7 +115,15 @@ def _first_line(message: str) -> str:
     return message.strip().splitlines()[0] if message.strip() else "no reason given"
 
 
-def verdict(code: int, found: Sequence[Case], strict: bool) -> tuple[int, list[str]]:
+def split_args(argv: Sequence[str]) -> tuple[str, list[str]]:
+    """`(marker, named ids)`: `--ci` anywhere picks the CI tier, the rest are ids. Pure."""
+    named = [arg for arg in argv if arg != CI_FLAG]
+    return (CI_MARKER if len(named) < len(argv) else MARKER), named
+
+
+def verdict(
+    code: int, found: Sequence[Case], strict: bool, marker: str = MARKER
+) -> tuple[int, list[str]]:
     """`(exit code, lines to print)` for pytest's `code` and the cases it reported. Pure.
 
     pytest printed its own `FAILED` lines, which `failed` here repeats: its report does
@@ -119,7 +135,7 @@ def verdict(code: int, found: Sequence[Case], strict: bool) -> tuple[int, list[s
     word = "FAILED" if strict else "SKIPPED"
     lines += [f"{word} {c.ident} - skipped: {_first_line(c.message)}" for c in skips]
     if not ran:
-        lines.append(f"e2e: no {MARKER} test executed, which is not a pass")
+        lines.append(f"e2e: no {marker} test executed, which is not a pass")
         return (code or 1), lines
     if strict and skips:
         lines.append(f"e2e: {len(skips)} test(s) skipped under the scheduled run")
@@ -127,15 +143,17 @@ def verdict(code: int, found: Sequence[Case], strict: bool) -> tuple[int, list[s
     return code, lines
 
 
-def pytest_argv(python: str, report: Path, named: Sequence[str] = ()) -> list[str]:
-    """The argv to run. Pure. `-m` comes after `addopts`, so it replaces their `not local`."""
+def pytest_argv(
+    python: str, report: Path, named: Sequence[str] = (), marker: str = MARKER
+) -> list[str]:
+    """The argv to run. Pure. `-m` comes after `addopts`, so it replaces their deselection."""
     return [
         python,
         "-m",
         "pytest",
         *(named or ["tests"]),
         "-m",
-        MARKER,
+        marker,
         "--tb=short",
         "-q",
         "-rfE",
@@ -156,14 +174,14 @@ def main(
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     env: Mapping[str, str] = os.environ,
 ) -> int:
-    named = sys.argv[1:] if argv is None else argv
+    marker, named = split_args(sys.argv[1:] if argv is None else argv)
     REPORT.parent.mkdir(parents=True, exist_ok=True)
     REPORT.unlink(missing_ok=True)
     python = venv_python(REPO_ROOT, sys.executable)
     # Captured and re-printed rather than inherited: a window-less child that captures
     # nothing writes to its hidden console, not to the pipe the pass reads.
     done = runner(
-        pytest_argv(python, REPORT, named),
+        pytest_argv(python, REPORT, named, marker),
         cwd=REPO_ROOT,
         env={**env, "PYTHONUTF8": "1"},
         capture_output=True,
@@ -174,7 +192,7 @@ def main(
     )
     print(_printable(done.stdout or ""), end="", flush=True)
     print(_printable(done.stderr or ""), end="", file=sys.stderr, flush=True)
-    code, lines = verdict(done.returncode, cases(REPORT), bool(env.get(ENV_FLAG)))
+    code, lines = verdict(done.returncode, cases(REPORT), bool(env.get(ENV_FLAG)), marker)
     for line in lines:
         print(_printable(line), flush=True)
     print(f"e2e: report in {REPORT.relative_to(REPO_ROOT).as_posix()}", flush=True)

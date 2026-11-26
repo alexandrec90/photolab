@@ -1,11 +1,14 @@
 """The album, opened on this machine the way devkit's task opens it, end to end.
 
-In the local tier (`scripts/e2e.py`, `.claude/rules/local-e2e.md`): it needs the Docker
-daemon for Postgres, node for Vite, uv and this checkout's `.env`, none of which a hosted
-runner has. It is the run CLAUDE.md asks for after any change to how the album starts or
-stops, because the Docker stack never showed what breaks natively: uvicorn's default loop
-killing psycopg on Windows, or a stop that orphans the real `node` and `python` and leaves
-them holding the ports.
+In both end-to-end tiers (`scripts/e2e.py`, `.claude/rules/local-e2e.md`). It needs the
+Docker daemon for Postgres, node for Vite, uv and a `.env`. The `PR Gate`'s `E2E` job has
+all of those on ubuntu-latest (`ci_e2e`, `scripts/e2e.py --ci`), so every default-branch
+commit shows whether the album opens, scans, serves and stops with its terminal there.
+It stays `local` too, because what it was written to catch is Windows: uvicorn's default
+loop killing psycopg, a venv's redirector `python.exe`, and a stop that orphans the real
+`node` and `python` and leaves them holding the ports. A Windows runner cannot stand in,
+since its Docker cannot run the Linux Postgres image `scripts/album.py` starts. It is the
+run CLAUDE.md asks for after any change to how the album starts or stops.
 
 `scripts/album.py` is started under a stand-in for the terminal, which is then killed
 alone, as closing the terminal does. The album is pointed at spare ports, a library of one
@@ -32,7 +35,7 @@ from sqlalchemy import create_engine, make_url, text
 from tests.conftest import database_url, jpeg_bytes
 from tests.test_album_script import SCRIPT, album
 
-pytestmark = pytest.mark.local
+pytestmark = [pytest.mark.local, pytest.mark.ci_e2e]
 
 ROOT = Path(__file__).resolve().parent.parent
 
