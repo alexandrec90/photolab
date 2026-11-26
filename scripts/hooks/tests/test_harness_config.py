@@ -21,11 +21,33 @@ from conftest import REPO_ROOT, load_module
 cfg = load_module("scripts/hooks/harness_config.py")
 
 
+def test_schedule_claims_no_task_by_default_and_only_named_ones():
+    assert cfg.Config().schedule == cfg.ScheduleConfig(())
+    claimed = cfg.from_dict({"schedule": {"tasks": ["Pool", "  Guard ", ""]}})
+    assert claimed.schedule.tasks == ("Pool", "Guard")
+    for bad in (
+        {"schedule": ["Pool"]},
+        {"schedule": {"tasks": "Pool"}},
+        {"schedule": {"tasks": [1]}},
+    ):
+        assert cfg.from_dict(bad).schedule.tasks == (), bad
+
+
 def test_delivery_defaults_to_the_gated_flow_and_takes_only_a_name_it_knows():
     assert cfg.Config().delivery == cfg.DeliveryConfig("gated")
     assert cfg.from_dict({"delivery": {"flow": "direct"}}).delivery.flow == "direct"
     for bad in ({"delivery": "direct"}, {"delivery": {"flow": "drect"}}, {"delivery": {"flow": 1}}):
         assert cfg.from_dict(bad).delivery.flow == "gated", bad
+
+
+def test_delivery_guarded_is_a_list_of_paths_and_nothing_else():
+    """The paths that transact money; empty by default, so nothing is guarded by accident
+    and nothing reads a misspelt value as "guard everything"."""
+    assert cfg.Config().delivery.guarded == ()
+    raw = {"delivery": {"flow": "direct", "guarded": ["src/execution/", " ", "x/*.js "]}}
+    assert cfg.from_dict(raw).delivery == cfg.DeliveryConfig("direct", ("src/execution/", "x/*.js"))
+    for bad in ("src/", ["src/", 3], None):
+        assert cfg.from_dict({"delivery": {"guarded": bad}}).delivery.guarded == (), bad
 
 
 def test_defaults_are_a_minimal_neutral_harness():

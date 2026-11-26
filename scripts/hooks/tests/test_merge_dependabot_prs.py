@@ -401,10 +401,14 @@ ROUTE_SCOPES = {
     # Listing and reading open PRs.
     "pulls": {("pull-requests", "read")},
     "pulls/*": {("pull-requests", "read")},
+    # What a PR changes, read against `[delivery] guarded`.
+    "pulls/*/files": {("pull-requests", "read")},
     # Merging writes a commit to the base branch and closes the PR.
     "pulls/*/merge": {("contents", "write"), ("pull-requests", "write")},
     # Starting the gate on what was just merged: `GITHUB_TOKEN`'s merge raises no `push`.
     "actions/workflows/*/dispatches": {("actions", "write")},
+    # Ending the gate of a PR the queue merged without it.
+    "actions/runs/*/cancel": {("actions", "write")},
     # Deleting a merged PR's head, so a checkout on it reads as spent.
     "git/refs/heads/*": {("contents", "write")},
 }
@@ -551,7 +555,58 @@ def test_merge_now_merges_with_no_gate_at_all(tmp_path):
     run = FakeRun(world(prs=[merge_now()], gate=""))
     assert in_the_queue(run, tmp_path) == 0
     assert merged_numbers(run) == [15]
-    assert not any("actions/runs" in arg for call in run.calls for arg in call), run.calls
+    assert not gate_read_before_the_merge(run), run.calls
+
+
+def gate_read_before_the_merge(run: FakeRun) -> bool:
+    """Whether any run was asked after while the PR was still open. After, the queue
+    looks for the PR's own gate, to cancel it."""
+    at = next(i for i, call in enumerate(run.calls) if "PUT" in call)
+    return any("actions/runs" in arg for call in run.calls[:at] for arg in call)
+
+
+def gate_runs(*entries: dict) -> dict:
+    return {"workflow_runs": [{"name": "PR Gate", "event": "pull_request", **e} for e in entries]}
+
+
+def cancelled(run: FakeRun) -> list[str]:
+    paths = [arg for call in run.calls for arg in call if arg.endswith("/cancel")]
+    return [path.split("/")[-2] for path in paths]
+
+
+def test_the_gate_of_a_pr_that_did_not_wait_for_it_is_cancelled(tmp_path):
+    """The merge is gated on the default branch, so the PR's own run is the same work
+    twice, on a runner the one verdict that counts is waiting for."""
+    routes = world(prs=[merge_now()])
+    routes["actions/runs"] = gate_runs(
+        {"id": 1, "status": "in_progress"},
+        {"id": 2, "status": "queued"},
+        {"id": 3, "status": "completed"},
+        {"id": 4, "status": "in_progress", "event": "workflow_dispatch"},
+        {"id": 5, "status": "in_progress", "name": "Auto-merge"},
+    )
+    run = FakeRun(routes)
+    assert in_the_queue(run, tmp_path) == 0
+    assert cancelled(run) == ["1", "2"]
+
+
+def test_outside_the_queue_no_gate_is_cancelled():
+    routes = world()
+    routes["actions/runs"]["workflow_runs"].append(
+        {"name": "PR Gate", "event": "pull_request", "id": 9, "status": "in_progress"}
+    )
+    run = FakeRun(routes)
+    assert merger.main(env(), run) == 0
+    assert merged_numbers(run) == [15] and cancelled(run) == []
+
+
+def test_a_gate_that_cannot_be_cancelled_costs_the_merge_nothing(tmp_path, capsys):
+    routes = world(prs=[merge_now()])
+    run = FakeRun(routes, fail={"actions/runs?": (1, "HTTP 503")})
+    assert in_the_queue(run, tmp_path) == 0
+    assert merged_numbers(run) == [15]
+    assert "Could not cancel PR Gate" in capsys.readouterr().out
+    merger.cancel_gate(REPO, {}, run)  # a PR with no head: nothing to look for
 
 
 def test_merge_now_outside_the_queue_job_merges_nothing(tmp_path):
@@ -602,8 +657,160 @@ def test_a_draft_is_still_unfinished_with_merge_now(tmp_path):
     assert merged_numbers(run) == []
 
 
-def test_a_held_pr_carries_neither_label_and_stays(tmp_path):
-    run = FakeRun(world(prs=[pr(labels=[])], gate=""))
+HERE = {"full_name": REPO}
+
+
+def shipped(number: int = 15, **overrides) -> dict:
+    """What Claude Code's built-in `/ship` opens: a person's branch here, no label."""
+    fields = {
+        "number": number,
+        "labels": [],
+        "user": {"login": "someone", "type": "User"},
+        "head": {"sha": SHA, "ref": "agent/thing-1123", "repo": HERE},
+        "base": {"ref": "main", "repo": {**HERE, "default_branch": "main"}},
+        "body": "Why it changed.",
+    }
+    fields.update(overrides)
+    return pr(**fields)
+
+
+def test_an_unlabelled_pr_merges_with_no_gate_in_a_direct_project(tmp_path):
+    """**The built-in `/ship`'s PR.** It applies no label, and nothing in this flow
+    stands between it and `main`: the session opens it and leaves."""
+    run = FakeRun(world(prs=[shipped()], gate=""))
+    assert in_the_queue(run, tmp_path) == 0
+    assert merged_numbers(run) == [15]
+    assert not gate_read_before_the_merge(run), run.calls
+
+
+def test_an_unlabelled_pr_waits_in_a_gated_project(tmp_path):
+    """The gated flow's whole meaning: nothing merges without a label and a green gate."""
+    run = FakeRun(world(prs=[shipped()], gate=""))
+    assert merger.main(env(MERGE_QUEUE="yes"), run, root=tmp_path) == 0
+    assert merged_numbers(run) == []
+
+
+def test_an_unlabelled_pr_waits_outside_the_queue_job(tmp_path):
+    run = FakeRun(world(prs=[shipped()], gate=""))
+    assert merger.main(env(), run, root=direct_project(tmp_path)) == 0
+    assert merged_numbers(run) == []
+
+
+@pytest.mark.parametrize(
+    ("why", "overrides"),
+    [
+        ("a draft", {"draft": True}),
+        ("the hold label", {"labels": [{"name": "hold"}]}),
+        ("a Hold line", {"body": "Why.\n\nHold: yes\nCloses #3"}),
+        ("a bot's PR", {"user": {"login": "dependabot[bot]", "type": "Bot"}}),
+        ("a fork", {"head": {"sha": SHA, "ref": "x", "repo": {"full_name": "fork/repo"}}}),
+        ("an undescribed head", {"head": {"sha": SHA, "ref": "x"}}),
+        ("a release", {"head": {"sha": SHA, "ref": "release/v1.2.3", "repo": HERE}}),
+    ],
+)
+def test_an_unlabelled_pr_that_says_wait_stays_open(tmp_path, why, overrides):
+    run = FakeRun(world(prs=[shipped(**overrides)], gate=""))
+    assert in_the_queue(run, tmp_path) == 0
+    assert merged_numbers(run) == [], why
+
+
+def test_a_sentence_mentioning_hold_is_not_a_hold():
+    assert merger.ships_unlabelled(shipped(body="We said hold: yes was the old way."))
+
+
+# --- money never skips its gate (`[delivery] guarded`) ----------------------------
+
+MONEY = '[delivery]\nflow = "direct"\nguarded = ["src/app/execution/", "extensions/*.js"]\n'
+
+
+def guarded_project(tmp_path):
+    (tmp_path / ".devkit.toml").write_text(MONEY, encoding="utf-8")
+    return tmp_path
+
+
+def files_world(paths, *, prs, gate="", **extra):
+    """`world`, with `pulls/<n>/files` routed ahead of the `pulls/<n>` it also contains."""
+    files = {f"pulls/{entry['number']}/files": [{"filename": p} for p in paths] for entry in prs}
+    return {**files, **world(prs=prs, gate=gate, **extra)}
+
+
+def guarded_queue(run, tmp_path) -> int:
+    return merger.main(env(MERGE_QUEUE="yes"), run, root=guarded_project(tmp_path))
+
+
+@pytest.mark.parametrize("opened", [shipped, merge_now], ids=["unlabelled", "merge-now"])
+def test_a_pr_touching_money_does_not_merge_without_its_gate(tmp_path, opened):
+    """**The owner's one exception (2026-11-24):** the code that transacts money -- the
+    IBKR trader's orders, a betting extension -- waits for a green gate, label or not."""
+    run = FakeRun(files_world(["README.md", "src/app/execution/broker.py"], prs=[opened()]))
+    assert guarded_queue(run, tmp_path) == 0
+    assert merged_numbers(run) == []
+
+
+@pytest.mark.parametrize("opened", [shipped, merge_now], ids=["unlabelled", "merge-now"])
+def test_a_pr_touching_money_still_merges_itself_once_green(tmp_path, opened):
+    """Gated is not held: the person never merges anything by hand."""
+    paths = ["extensions/panel.js"]
+    run = FakeRun(files_world(paths, prs=[opened()], gate="success"))
+    assert guarded_queue(run, tmp_path) == 0
+    assert merged_numbers(run) == [15]
+
+
+def test_a_pr_beside_the_money_merges_with_no_gate(tmp_path):
+    """Collectors, models and dashboards in the same project are not impeded."""
+    paths = ["src/app/collectors/odds.py", "src/app/execution_report.md", "extensions/a.css"]
+    run = FakeRun(files_world(paths, prs=[shipped()]))
+    assert guarded_queue(run, tmp_path) == 0
+    assert merged_numbers(run) == [15]
+
+
+def test_a_rename_out_of_the_money_is_still_money(tmp_path):
+    files = {
+        "pulls/15/files": [{"filename": "x.py", "previous_filename": "src/app/execution/b.py"}]
+    }
+    run = FakeRun({**files, **world(prs=[shipped()], gate="")})
+    assert guarded_queue(run, tmp_path) == 0
+    assert merged_numbers(run) == []
+
+
+def test_an_unreadable_file_list_refuses_rather_than_merges(tmp_path):
+    """Fail closed: "could not tell" must never read as "nothing guarded"."""
+    run = FakeRun(world(prs=[shipped()], gate=""), fail={"/files": (1, "HTTP 502")})
+    assert guarded_queue(run, tmp_path) == 1
+    assert merged_numbers(run) == []
+
+
+def test_a_project_with_nothing_guarded_never_lists_files(tmp_path):
+    run = FakeRun(world(prs=[shipped()], gate=""))
+    assert in_the_queue(run, tmp_path) == 0
+    assert not any("/files" in arg for call in run.calls for arg in call)
+
+
+def test_the_file_list_is_read_past_its_first_page():
+    first = [{"filename": f"f{i}"} for i in range(100)]
+    run = FakeRun({"&page=1": first, "&page=2": [{"filename": "last"}]})
+    assert merger.pr_files(REPO, 15, run)[-1] == "last"
+
+
+@pytest.mark.parametrize(
+    ("text", "globs"),
+    [
+        (MONEY, ("src/app/execution/", "extensions/*.js")),
+        ('[delivery]\nflow = "direct"\n', ()),
+        ('[delivery]\nguarded = "src/"\n', ()),
+        ('[delivery]\nguarded = ["", " a/ "]\n', ("a/",)),
+        ("", ()),
+    ],
+)
+def test_guarded_globs_reads_only_a_list(tmp_path, text, globs):
+    (tmp_path / ".devkit.toml").write_text(text, encoding="utf-8")
+    assert merger.guarded_globs(merger.project_settings(tmp_path)) == globs
+
+
+def test_automerge_still_waits_for_its_gate_in_a_direct_project(tmp_path):
+    """An adoption or a Dependabot bump asked for the gate; the direct flow keeps that."""
+    labelled = shipped(labels=[{"name": "automerge"}])
+    run = FakeRun(world(prs=[labelled], gate=""))
     assert in_the_queue(run, tmp_path) == 0
     assert merged_numbers(run) == []
 
@@ -849,14 +1056,16 @@ def test_in_line_keeps_either_label_only_in_the_queue_and_orders_by_age():
 
 def test_take_turn_says_what_became_of_the_pr():
     run = FakeRun(world(prs=[merge_now()], gate=""))
-    outcome, detail = merger.take_turn(REPO, merge_now(), run, lambda _: None, "", queue=True)
+    outcome, detail = merger.take_turn(
+        REPO, merge_now(), run, lambda _: None, "", merger.Lane(queue=True)
+    )
     assert outcome == merger.MERGED and detail["number"] == 15
 
 
 def test_drain_counts_and_names_the_branch_that_moved():
     listing = [merge_now(10, base=ONTO_MAIN), merge_now(20, mergeable=False)]
     run = FakeRun(world(prs=listing, gate=""))
-    assert merger.drain(REPO, listing, run, lambda _: None, "", True) == (1, 0, "main")
+    assert merger.drain(REPO, listing, run, lambda _: None, "", merger.Lane(True)) == (1, 0, "main")
     assert dispatches(run) == [], "the queue's tidy job gates after it"
 
 
@@ -882,7 +1091,14 @@ def test_the_drain_runs_one_at_a_time_and_runs_the_default_branchs_script():
     assert "group: merge-queue" in job
     assert "cancel-in-progress: false" in job
     assert "ref: ${{ github.event.repository.default_branch }}" in job
-    assert "merge-now" in job
+
+
+def test_any_pr_from_this_repository_starts_the_drain():
+    """Gating the job on `merge-now` would leave every built-in `/ship` PR, which carries
+    no label, for the hourly pass: an hour the session would spend watching it."""
+    condition = _job("sweep").split("runs-on:", 1)[0]
+    assert "pull_request" in condition
+    assert "labels" not in condition
 
 
 def test_tidying_never_shares_the_drains_group():
@@ -927,3 +1143,14 @@ def test_green_follows_only_a_default_branch_run_that_passed():
     condition = job.split("if: >-", 1)[1].split("runs-on:", 1)[0]
     assert '["push", "workflow_dispatch"]' in condition
     assert "pull_request" not in condition
+
+
+def test_green_catches_up_on_the_schedule_with_no_run_to_name_the_commit():
+    """2026-11-23: the gate this file's own merge dispatched passed on two commits and
+    raised no `workflow_run` for either, so `green` stayed two merges behind for eleven
+    hours. The hourly pass moves it, and says it has no commit in hand."""
+    job = _job("green")
+    condition = job.split("if: >-", 1)[1].split("runs-on:", 1)[0]
+    assert "github.event_name == 'schedule' ||" in condition
+    assert "CATCH_UP: ${{ github.event_name == 'schedule' }}" in job
+    assert "RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}" in job
