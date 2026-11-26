@@ -22,8 +22,9 @@ Every code change must include tests in the same commit. If you touch something
 that has no test, write the test in the same commit even if the logic didn't change.
 
 - **New unit of logic:** the happy path, the error cases, and the edge cases.
-- **Bug fix:** write the regression test first and watch it fail before you fix it. One
-  that has never failed is asserting the wrong thing.
+- **Bug fix:** write the regression test first, against the behaviour the bug breaks. One
+  that has never failed is asserting the wrong thing; CI or a fixer watches it fail, not
+  a project session.
 - **Coverage floors are ratchets:** never lower it merely to make a change pass. The
   other end of the same rule is the one that slips quietly, because raising a ceiling —
   a timeout, a retry count, a size or complexity limit, a baseline of known gaps — reads
@@ -33,9 +34,8 @@ that has no test, write the test in the same commit even if the logic didn't cha
   you found.
 - A skipped or `xfail` test carries a linked issue or a one-line reason in the marker.
 
-Running tests is optional, and the full suite is not yours to run — see
-`.claude/rules/session-scope.md`. The gate runs once, in CI, on the PR the fix pass opens
-for you.
+A project session runs no tests and provisions nothing to run them — see
+`.claude/rules/session-scope.md`. CI and the scheduled jobs run them.
 
 Instruction files — `CLAUDE.md`, `.claude/rules/*`, `.claude/skills/*` — are under this
 same mandate. See `.claude/rules/authoring.md`.
@@ -107,7 +107,7 @@ is the half that is easy to drop**, here and for an `until` loop on a file a job
 write (or put that loop in `Monitor`): a foreground wait holds the turn. **A subagent's
 notice arrives only between its calls**: left with only the wait, it runs the job in the
 foreground, then one `until` loop on the file named when Claude Code moves that call out
-at 180 s or it backgrounded it; never `sleep`.
+at 180 s or it backgrounded it, ending `|| [ $SECONDS -gt 900 ]`; never `sleep`.
 
 Diagnosing a failure and asking once are not polling; the waste begins at the *second*
 identical poll.
@@ -118,7 +118,7 @@ the table in the evidence file: `CONFLICTING` is a gate that will never run, and
 `UNSTABLE` with an empty rollup is one that ran, as a `workflow_dispatch` the PR cannot show.
 
 When the gate will outlast anything useful you could do, stop: report the branch pushed and
-the gate running, and let the result arrive in a fresh session.
+the gate running.
 
 ## Scripts
 

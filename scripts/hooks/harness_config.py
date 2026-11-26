@@ -277,9 +277,27 @@ class DeliveryConfig:
     `flow` is `gated` -- a PR the gate decides -- or `direct`, which merges first and
     runs every check after the merge. Devkit's fix pass and ship task are what read it,
     from each project's checkout; the field is here so the manifest's schema names it.
+
+    `guarded` names the paths that transact money -- order placement, a bet slip. A
+    change to one waits for its gate and then merges itself; nothing else does. A glob
+    where `*` crosses `/`, or a directory with a trailing `/`. Read by
+    `merge-dependabot-prs.guarded_paths`, which `land.py` shares.
     """
 
     flow: str = "gated"
+    guarded: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ScheduleConfig:
+    """The Windows scheduled tasks this project owns, by their scheduler names.
+
+    Devkit's fix pass reads it from every registered project's checkout and judges those
+    tasks beside its own `devkit-` jobs, filing a failure against the project that
+    claims it (`project_tasks.py`). The field is here so the manifest's schema names it.
+    """
+
+    tasks: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -302,6 +320,7 @@ class Config:
     test_contract: TestContractConfig = field(default_factory=TestContractConfig)
     structure: StructureConfig = field(default_factory=StructureConfig)
     delivery: DeliveryConfig = field(default_factory=DeliveryConfig)
+    schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
 
     def env(self, suffix: str) -> str:
         """The prefixed control-env name, e.g. env("SKIP_STOP_VERIFY")."""
@@ -493,7 +512,15 @@ def _delivery_from(raw: dict[str, Any], default: DeliveryConfig) -> DeliveryConf
     # An unknown word is the default: the other flow takes a gate away, so nothing but
     # its exact name selects it.
     flow = raw.get("flow")
-    return replace(default, flow=flow) if flow in ("gated", "direct") else default
+    chosen = replace(default, flow=flow) if flow in ("gated", "direct") else default
+    guarded = _as_str_tuple(raw.get("guarded"), default.guarded)
+    return replace(chosen, guarded=tuple(g.strip() for g in guarded if g.strip()))
+
+
+def _schedule_from(raw: dict[str, Any], default: ScheduleConfig) -> ScheduleConfig:
+    # A blank name claims nothing the scheduler could list, so it is dropped, not kept.
+    tasks = _as_str_tuple(raw.get("tasks"), default.tasks)
+    return replace(default, tasks=tuple(t.strip() for t in tasks if t.strip()))
 
 
 def from_dict(data: dict[str, Any]) -> Config:
@@ -511,6 +538,7 @@ def from_dict(data: dict[str, Any]) -> Config:
     tc_raw = data.get("test_contract", {}) if isinstance(data.get("test_contract"), dict) else {}
     st_raw = data.get("structure", {}) if isinstance(data.get("structure"), dict) else {}
     deliv_raw = data.get("delivery", {}) if isinstance(data.get("delivery"), dict) else {}
+    sched_raw = data.get("schedule", {}) if isinstance(data.get("schedule"), dict) else {}
     return Config(
         env_prefix=str(project.get("env_prefix", default.env_prefix)),
         app_dir=str(paths.get("app", default.app_dir)),
@@ -526,6 +554,7 @@ def from_dict(data: dict[str, Any]) -> Config:
         test_contract=_test_contract_from(tc_raw, default.test_contract),
         structure=_structure_from(st_raw, default.structure),
         delivery=_delivery_from(deliv_raw, default.delivery),
+        schedule=_schedule_from(sched_raw, default.schedule),
     )
 
 
